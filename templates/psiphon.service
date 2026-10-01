@@ -1,0 +1,16 @@
+[Unit]
+Description=Psiphon egress __REGION__
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__DATA_DIR__
+ExecStart=__BIN__ -config __CONFIG__
+Restart=always
+RestartSec=8
+StartLimitIntervalSec=0
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
