@@ -43,7 +43,7 @@ client  --TLS:443/path-->  nginx  -->  Xray inbound (localhost)
 ## Install on the VPS
 
 ```bash
-git clone https://github.com/<you>/sanai-xui-psiphone-multi-location.git
+git clone [https://github.com/<you>/sanai-xui-psiphone-multi-location.git](https://github.com/amirh55/sanai-xui-psiphone-multi-location.git)
 cd sanai-xui-psiphone-multi-location
 python3 install.py
 ```
