@@ -91,7 +91,7 @@ def clone_from_inbound(p: Panel, source_id: int) -> dict:
     }
 
 
-def ensure_inbound(p: Panel, rec: dict, domain: str, clone: dict, attach_email: str | None) -> int:
+def ensure_inbound(p: Panel, rec: dict, domain: str, clone: dict, attach_email: str | None, stream: dict | None = None) -> int:
     opts = p.req("GET", "/panel/api/inbounds/options").get("obj") or []
     by_remark = {str(x.get("remark")): x for x in opts}
     existing = by_remark.get(rec["remark"])
@@ -99,7 +99,7 @@ def ensure_inbound(p: Panel, rec: dict, domain: str, clone: dict, attach_email: 
     if clone.get("encryption"):
         settings["encryption"] = clone["encryption"]
     # ML-KEM + fallbacks crash Xray
-    stream = {
+    stream = stream or {
         "network": "ws",
         "security": "none",
         "wsSettings": {
@@ -164,23 +164,23 @@ def ensure_inbound(p: Panel, rec: dict, domain: str, clone: dict, attach_email: 
     return rec["id"]
 
 
-def add_host(p: Panel, rec: dict, domain: str) -> None:
+def add_host(p: Panel, rec: dict, domain: str, alpn: list[str] | None = None, address: str | None = None) -> None:
     groups = p.req("GET", "/panel/api/hosts/list").get("obj") or []
     iid = rec["id"]
     for g in groups:
-        if iid in (g.get("inboundIds") or []) and g.get("port") == 443 and domain in str(g.get("hosts")):
+        if iid in (g.get("inboundIds") or []) and g.get("port") == 443 and (address or domain) in str(g.get("hosts")):
             ui.say("host already hast baraye %s" % rec["remark"])
             return
     payload = {
         "inboundIds": [iid],
-        "hosts": [domain],
+        "hosts": [address or domain],
         "port": 443,
         "remark": rec["remark"] + "-443",
         "isDisabled": False,
         "security": "tls",
         "sni": domain,
         "hostHeader": domain,
-        "alpn": ["http/1.1"],
+        "alpn": alpn or ["http/1.1"],
         "fingerprint": "chrome",
     }
     res = p.req("POST", "/panel/api/hosts/add", payload)
@@ -214,7 +214,7 @@ def _is_stale_psiphon_rule(rule: dict, outbound_tags: set, inbound_tags: set) ->
     return False
 
 
-def apply_routing(p: Panel, recs: list[dict]) -> None:
+def get_xray(p: Panel) -> dict:
     raw = p.req("POST", "/panel/api/xray/", {})
     obj = raw.get("obj")
     if isinstance(obj, str):
@@ -224,6 +224,45 @@ def apply_routing(p: Panel, recs: list[dict]) -> None:
         xs = json.loads(xs)
     if not isinstance(xs, dict):
         raise RuntimeError("xraySetting nist")
+    return xs
+
+
+def put_xray(p: Panel, xs: dict) -> None:
+    """Save xraySetting, restart Xray, fail if it does not come back."""
+    res = p.form("/panel/api/xray/update", {"xraySetting": json.dumps(xs)})
+    ui.say("xray routing update %s %s" % (res.get("success"), str(res.get("msg"))[:180]))
+    if not res.get("success"):
+        raise RuntimeError(res.get("msg"))
+    rst = p.req("POST", "/panel/api/server/restartXrayService", {})
+    ui.say("xray restart %s" % rst.get("success"))
+    time.sleep(3)
+    st = p.req("GET", "/panel/api/server/status")
+    x = (st.get("obj") or {}).get("xray") or {}
+    ui.say("xray state %s %s" % (x.get("state"), x.get("errorMsg") or ""))
+    if x.get("state") != "running":
+        raise RuntimeError("xray running nist: %s" % x.get("errorMsg"))
+
+
+def outbound_tags(xs: dict) -> list[str]:
+    return [o.get("tag") for o in (xs.get("outbounds") or []) if o.get("tag")]
+
+
+def route_inbound(xs: dict, inbound_tag: str, outbound_tag: str) -> dict:
+    """One rule inbound -> outbound, placed after the api rule. Replaces older rules for this inbound."""
+    routing = xs.get("routing") or {"rules": []}
+    rules = [
+        r for r in (routing.get("rules") or [])
+        if not (r.get("inboundTag") == [inbound_tag] and set(r) <= {"type", "inboundTag", "outboundTag"})
+    ]
+    insert_at = 1 if rules and "api" in (rules[0].get("inboundTag") or []) else 0
+    rules.insert(insert_at, {"type": "field", "inboundTag": [inbound_tag], "outboundTag": outbound_tag})
+    routing["rules"] = rules
+    xs["routing"] = routing
+    return xs
+
+
+def apply_routing(p: Panel, recs: list[dict]) -> None:
+    xs = get_xray(p)
 
     dns = xs.get("dns") or {}
     if not dns.get("servers"):
@@ -265,35 +304,27 @@ def apply_routing(p: Panel, recs: list[dict]) -> None:
     cleaned[insert_at:insert_at] = extra
     routing["rules"] = cleaned
     xs["routing"] = routing
+    put_xray(p, xs)
 
-    res = p.form("/panel/api/xray/update", {"xraySetting": json.dumps(xs)})
-    ui.say("xray routing update %s %s" % (res.get("success"), str(res.get("msg"))[:180]))
-    if not res.get("success"):
-        raise RuntimeError(res.get("msg"))
-    rst = p.req("POST", "/panel/api/server/restartXrayService", {})
-    ui.say("xray restart %s" % rst.get("success"))
-    time.sleep(3)
-    st = p.req("GET", "/panel/api/server/status")
-    x = (st.get("obj") or {}).get("xray") or {}
-    ui.say("xray state %s %s" % (x.get("state"), x.get("errorMsg") or ""))
-    if x.get("state") != "running":
-        raise RuntimeError("xray running nist: %s" % x.get("errorMsg"))
+
+def client_uuid(p: Panel, email: str | None) -> tuple[str | None, str]:
+    """(uuid, encryption) of a panel client, read from its vless:// links."""
+    if not email:
+        return None, ""
+    try:
+        links = p.req("GET", "/panel/api/clients/links/%s" % email).get("obj") or []
+        for l in links:
+            if l.startswith("vless://"):
+                uuid = l.split("://", 1)[1].split("@", 1)[0]
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(l).query)
+                return uuid, (q.get("encryption") or [""])[0]
+    except Exception as e:
+        ui.say("links fail: %s" % e)
+    return None, ""
 
 
 def client_links(p: Panel, recs: list[dict], domain: str, email: str | None) -> list[str]:
-    uuid = None
-    encryption = ""
-    if email:
-        try:
-            links = p.req("GET", "/panel/api/clients/links/%s" % email).get("obj") or []
-            for l in links:
-                if l.startswith("vless://"):
-                    uuid = l.split("://", 1)[1].split("@", 1)[0]
-                    q = urllib.parse.parse_qs(urllib.parse.urlparse(l).query)
-                    encryption = (q.get("encryption") or [""])[0]
-                    break
-        except Exception as e:
-            ui.say("links fail: %s" % e)
+    uuid, encryption = client_uuid(p, email)
     out = []
     for rec in recs:
         path_enc = urllib.parse.quote(camouflage.xray_ws_path(rec["path"]), safe="")

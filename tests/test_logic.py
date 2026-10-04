@@ -117,6 +117,80 @@ def test_camouflage_paths():
     assert not set(extra) & set(picked)
 
 
+def test_xhttp_link():
+    from urllib.parse import parse_qs, urlparse
+    from lib import xhttp as X
+
+    link = X.client_link(
+        "e9e61308-3d59-4399-af0f-d5e074560650", "172.64.230.228", "my.example.com",
+        X.DEFAULT_PATH, ech=X.CF_ECH, pcs="AB12", remark="cf-edge-warp-test",
+    )
+    assert link.startswith("vless://e9e61308-3d59-4399-af0f-d5e074560650@172.64.230.228:443?encryption=none&security=tls&sni=my.example.com")
+    assert "&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1&pcs=AB12&type=xhttp" in link
+    assert "&path=%2Fapi%2Fv1%2Fitems&mode=auto&extra=%7B%22mode%22%3A%22auto%22%2C%22xPaddingBytes%22%3A%22100-1000%22%7D#cf-edge-warp-test" in link
+    q = parse_qs(urlparse(link).query)
+    assert q["alpn"] == ["h2"] and q["fp"] == ["chrome"] and q["host"] == ["my.example.com"]
+    plain = X.client_link("U", "d.com", "d.com", "/x")
+    assert "ech=" not in plain and "pcs=" not in plain
+
+    st = X.stream_settings("/api/v1/items")
+    assert st["network"] == "xhttp" and st["security"] == "none"
+    assert st["xhttpSettings"]["path"] == "/api/v1/items"
+    assert st["xhttpSettings"]["xPaddingBytes"] == "100-1000"
+    assert st["xhttpSettings"]["mode"] == "auto"
+
+
+def test_xhttp_nginx_insert():
+    from lib import nginx_site as NG
+    from lib import xhttp as X
+
+    conf = """server {
+    listen 80;
+    server_name d.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name d.com;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+"""
+    block = NG.xhttp_location("/api/v1/items", 10088)
+    out = X.insert_location(conf, block, "/api/v1/items")
+    assert out.count("location /api/v1/items {") == 1
+    assert out.index("grpc_pass grpc://127.0.0.1:10088") > out.index("listen 443")
+    assert out.rstrip().endswith("}")
+    assert X.insert_location(out, block, "/api/v1/items") == out
+    try:
+        X.insert_location("server {\n    listen 80;\n}\n", block, "/api/v1/items")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("no 443 server must fail")
+
+
+def test_route_inbound():
+    from lib import xui
+
+    xs = {
+        "outbounds": [{"tag": "direct"}, {"tag": "warp"}],
+        "routing": {"rules": [
+            {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
+            {"type": "field", "inboundTag": ["in-10088-xhttp"], "outboundTag": "direct"},
+            {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"},
+        ]},
+    }
+    assert xui.outbound_tags(xs) == ["direct", "warp"]
+    xui.route_inbound(xs, "in-10088-xhttp", "warp")
+    rules = xs["routing"]["rules"]
+    assert rules[0]["outboundTag"] == "api"
+    assert rules[1] == {"type": "field", "inboundTag": ["in-10088-xhttp"], "outboundTag": "warp"}
+    assert len(rules) == 3
+
+
 if __name__ == "__main__":
     test_countries()
     test_parse_selection()
@@ -124,4 +198,7 @@ if __name__ == "__main__":
     test_parse_panel_url()
     test_scoped_dns()
     test_camouflage_paths()
+    test_xhttp_link()
+    test_xhttp_nginx_insert()
+    test_route_inbound()
     print("ok")

@@ -90,6 +90,35 @@ Stop Psiphon units (does not delete panel inbounds):
 python3 uninstall.py
 ```
 
+## VLESS + XHTTP behind Cloudflare CDN (`xhttp_cdn.py`)
+
+Separate script for a CDN link like:
+
+`vless://UUID@172.64.230.228:443?encryption=none&security=tls&sni=DOMAIN&fp=chrome&alpn=h2&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1&type=xhttp&host=DOMAIN&path=%2Fapi%2Fv1%2Fitems&mode=auto&extra=...xPaddingBytes 100-1000...`
+
+```
+client --TLS h2 + ECH--> Cloudflare edge --TLS--> nginx :443 --h2c--> Xray xhttp 127.0.0.1:10088
+                                                                      --> direct  (or WARP outbound)
+```
+
+```bash
+python3 xhttp_cdn.py --dry-run   # preview in build/
+python3 xhttp_cdn.py             # root, on the VPS
+```
+
+It adds `location /api/v1/items` to the existing nginx site (keeps WS locations, `.bak` + rollback if `nginx -t` fails) or writes a new site, creates/updates the `cf-xhttp` inbound (`network=xhttp`, `mode=auto`, `xPaddingBytes=100-1000`, `security=none`, listen `127.0.0.1`), optionally routes it to an outbound whose tag contains `warp`, and prints the client link.
+
+Cloudflare side (by hand, once):
+
+1. DNS `A` record → VPS IP, **Proxied** (orange cloud).
+2. SSL/TLS mode **Full (strict)**. Origin cert = Let's Encrypt or Cloudflare Origin CA.
+3. SSL/TLS → Edge Certificates → **Encrypted ClientHello** on (otherwise drop `ech=` from the link).
+4. Link address = any clean Cloudflare IP or the domain itself.
+
+- `pcs` = SHA256 of the Cloudflare **edge** cert the client sees, not your origin cert. Cloudflare rotates it (~90 days), so a pinned link stops working after that. Off by default.
+- WARP: create it first in panel → Xray Configs → Outbounds → WARP, then run the script again with WARP = yes.
+- `ech` needs a recent Xray client (v2rayN / v2rayNG / Hiddify with Xray-core 25.x+).
+
 ## Country codes (Psiphon `EgressRegion`)
 
 AT BE BG CA CH CZ DE DK EE ES FI FR GB HU IE IN IT JP LV NL NO PL RO RS SE SG SK US

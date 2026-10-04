@@ -142,6 +142,35 @@ server {
     sh("systemctl reload nginx || systemctl restart nginx")
 
 
+def site_conf(domain: str) -> Path:
+    return Path("/etc/nginx/sites-available/%s.conf" % domain)
+
+
+def add_location(domain: str, block: str, path: str) -> bool:
+    """Insert a location into an existing site (keeps WS locations). False if no site yet."""
+    from . import xhttp
+
+    avail = site_conf(domain)
+    if not avail.is_file():
+        return False
+    old = avail.read_text(encoding="utf-8")
+    new = xhttp.insert_location(old, block, path)
+    if new == old:
+        ui.say("location %s already too nginx hast" % path)
+        return True
+    backup = avail.with_name(avail.name + ".bak")
+    backup.write_text(old, encoding="utf-8")
+    avail.write_text(new, encoding="utf-8")
+    try:
+        sh("nginx -t")
+    except RuntimeError:
+        avail.write_text(old, encoding="utf-8")
+        ui.say("nginx -t fail, config ghabli bargasht.")
+        raise
+    sh("systemctl reload nginx || systemctl restart nginx")
+    return True
+
+
 def check_443() -> str:
     p = sh("ss -lntp | grep ':443 ' || true", check=False)
     return p.stdout.strip()
